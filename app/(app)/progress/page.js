@@ -4,12 +4,22 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { dayNumberFromStartDate, getAllProgress } from "@/lib/db";
-import { getDayPlan, LEVELS } from "@/lib/schedule";
-import { usePeople } from "../PersonProvider";
+import { getDayPlan, LEVELS, BENCHMARK_ITEMS, BENCHMARK_DAYS, formatBenchmarkValue } from "@/lib/schedule";
+import { useAccount } from "../AccountProvider";
+import AccountabilityGrid from "../AccountabilityGrid";
+
+// For "reps" bigger is better; for "time" smaller is better.
+function isBest(type, value, allValues) {
+  if (value === null || value === undefined || value === "") return false;
+  const nums = allValues.filter((v) => v !== null && v !== undefined && v !== "");
+  if (nums.length < 2) return false;
+  const best = type === "reps" ? Math.max(...nums) : Math.min(...nums);
+  return Number(value) === best;
+}
 
 export default function ProgressPage() {
   const supabase = createClient();
-  const { activePerson, loading: peopleLoading } = usePeople();
+  const { userId, profile, loading: accountLoading } = useAccount();
   const [stats, setStats] = useState({
     completed: 0,
     remaining: 100,
@@ -18,32 +28,41 @@ export default function ProgressPage() {
     strength: 0,
     rest: 0,
   });
+  const [benchByDay, setBenchByDay] = useState({});
+  const [doneDaySet, setDoneDaySet] = useState(new Set());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!activePerson) return;
+    if (!userId || !profile) return;
     (async () => {
       setLoading(true);
-      const rows = await getAllProgress(supabase, activePerson.id);
+      const rows = await getAllProgress(supabase, userId);
       const done = rows.filter((r) => r.done);
 
       let hiitCount = 0,
         strCount = 0,
         restCount = 0;
       done.forEach((r) => {
-        const plan = getDayPlan(r.day, activePerson.level);
+        const plan = getDayPlan(r.day, profile.level);
         if (plan.kind === "REST") restCount++;
         else if (plan.pillClass === "hiit") hiitCount++;
         else strCount++;
       });
 
-      const today = dayNumberFromStartDate(activePerson.start_date);
-      const doneDaySet = new Set(done.map((r) => r.day));
+      const today = dayNumberFromStartDate(profile.start_date);
+      const doneSet = new Set(done.map((r) => r.day));
+      setDoneDaySet(doneSet);
       let streak = 0;
       for (let d = today; d >= 1; d--) {
-        if (doneDaySet.has(d)) streak++;
+        if (doneSet.has(d)) streak++;
         else break;
       }
+
+      const byDay = {};
+      BENCHMARK_DAYS.forEach((d) => {
+        byDay[d] = rows.find((r) => r.day === d)?.benchmarks || {};
+      });
+      setBenchByDay(byDay);
 
       setStats({
         completed: done.length,
@@ -56,31 +75,30 @@ export default function ProgressPage() {
       setLoading(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePerson?.id, activePerson?.level, activePerson?.start_date]);
+  }, [userId, profile?.level, profile?.start_date]);
 
-  if (peopleLoading || !activePerson) {
+  if (accountLoading || !profile) {
     return (
       <div className="card">
-        <p style={{ color: "var(--muted)" }}>
-          {peopleLoading ? "Loading..." : "No person set up yet — add one on the People page."}
-        </p>
+        <p style={{ color: "var(--muted)" }}>Loading...</p>
       </div>
     );
   }
 
-  const levelLabel = LEVELS.find((l) => l.id === activePerson.level)?.label || "Beginner";
+  const levelLabel = LEVELS.find((l) => l.id === profile.level)?.label || "Beginner";
+  const hasAnyBenchmark = BENCHMARK_DAYS.some((d) => Object.keys(benchByDay[d] || {}).length > 0);
 
   return (
     <>
       <div className="card">
         <div className="row">
-          <h2>{activePerson.name}&apos;s Progress</h2>
+          <h2>Your Progress</h2>
           <span className="pill phase">{levelLabel}</span>
         </div>
         <p style={{ color: "var(--muted)", fontSize: ".8rem", marginTop: 4 }}>
-          Started {activePerson.start_date} ·{" "}
-          <Link href="/people" style={{ color: "var(--accent)" }}>
-            edit level, start date, or add another person
+          Started {profile.start_date} ·{" "}
+          <Link href="/settings" style={{ color: "var(--accent)" }}>
+            edit level or start date
           </Link>
         </p>
         {loading ? (
@@ -131,6 +149,64 @@ export default function ProgressPage() {
             <span className="dot" style={{ background: "var(--test)" }}></span>Benchmark test day
           </span>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>100-Day Accountability</h2>
+        <p style={{ color: "var(--muted)", fontSize: ".8rem", marginTop: 4 }}>
+          Tap any missed (brown) day to jump back and fill it in.
+        </p>
+        {loading ? (
+          <p style={{ color: "var(--muted)" }}>Loading...</p>
+        ) : (
+          <AccountabilityGrid startDate={profile.start_date} doneDays={doneDaySet} linkable />
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Benchmark Progress</h2>
+        {loading ? (
+          <p style={{ color: "var(--muted)" }}>Loading...</p>
+        ) : !hasAnyBenchmark ? (
+          <p style={{ color: "var(--muted)", fontSize: ".85rem", marginTop: 6 }}>
+            No benchmark numbers logged yet. Fill in your results on{" "}
+            <Link href="/today?day=1" style={{ color: "var(--accent)" }}>
+              Day 1
+            </Link>
+            , then again on Day 50 and Day 100, and your before/after will show up here.
+          </p>
+        ) : (
+          <table className="compare-table" style={{ marginTop: 8 }}>
+            <thead>
+              <tr>
+                <th>Test</th>
+                <th>Day 1</th>
+                <th>Day 50</th>
+                <th>Day 100</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(BENCHMARK_ITEMS).map(([key, item]) => {
+                const raw = BENCHMARK_DAYS.map((d) => benchByDay[d]?.[key]);
+                const anyValue = raw.some((v) => v !== null && v !== undefined && v !== "");
+                if (!anyValue) return null;
+                return (
+                  <tr key={key}>
+                    <td>
+                      {item.label}
+                      {item.unit ? <span style={{ color: "var(--muted)" }}> ({item.unit})</span> : null}
+                    </td>
+                    {raw.map((v, i) => (
+                      <td key={i} className={isBest(item.type, v, raw) ? "best" : undefined}>
+                        {formatBenchmarkValue(item.type, v) || "—"}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="card">

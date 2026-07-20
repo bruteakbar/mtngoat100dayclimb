@@ -5,19 +5,19 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { getAllProgress } from "@/lib/db";
 import { getDayPlan, PHASE_NAMES, LEVELS } from "@/lib/schedule";
-import { usePeople } from "../PersonProvider";
+import { useAccount } from "../AccountProvider";
 
 export default function SchedulePage() {
   const supabase = createClient();
   const router = useRouter();
-  const { activePerson, loading: peopleLoading } = usePeople();
+  const { userId, profile, loading: accountLoading } = useAccount();
   const [phaseFilter, setPhaseFilter] = useState("all");
   const [doneDays, setDoneDays] = useState({});
 
   useEffect(() => {
-    if (!activePerson) return;
+    if (!userId) return;
     (async () => {
-      const rows = await getAllProgress(supabase, activePerson.id);
+      const rows = await getAllProgress(supabase, userId);
       const map = {};
       rows.forEach((r) => {
         if (r.done) map[r.day] = true;
@@ -25,9 +25,9 @@ export default function SchedulePage() {
       setDoneDays(map);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePerson?.id]);
+  }, [userId]);
 
-  const level = activePerson?.level || "beginner";
+  const level = profile?.level || "beginner";
 
   const days = useMemo(() => {
     const arr = [];
@@ -41,12 +41,10 @@ export default function SchedulePage() {
 
   const levelLabel = LEVELS.find((l) => l.id === level)?.label || "Beginner";
 
-  if (peopleLoading || !activePerson) {
+  if (accountLoading || !profile) {
     return (
       <div className="card">
-        <p style={{ color: "var(--muted)" }}>
-          {peopleLoading ? "Loading..." : "No person set up yet — add one on the People page."}
-        </p>
+        <p style={{ color: "var(--muted)" }}>Loading...</p>
       </div>
     );
   }
@@ -54,9 +52,7 @@ export default function SchedulePage() {
   return (
     <div className="card">
       <div className="row" style={{ marginBottom: 10 }}>
-        <span className="pill phase">
-          {activePerson.name} · {levelLabel} plan
-        </span>
+        <span className="pill phase">{levelLabel} plan</span>
       </div>
       <div className="filters">
         <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>

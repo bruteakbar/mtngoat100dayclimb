@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { usePeople } from "./PersonProvider";
+import { useAccount } from "./AccountProvider";
 
-const TABS = [
+const BASE_TABS = [
   { href: "/today", label: "Today" },
   { href: "/schedule", label: "Schedule" },
   { href: "/library", label: "Library" },
-  { href: "/people", label: "People" },
+  { href: "/settings", label: "Settings" },
   { href: "/progress", label: "Progress" },
 ];
 
@@ -17,7 +17,9 @@ export default function NavBar() {
   const pathname = usePathname();
   const router = useRouter();
   const supabase = createClient();
-  const { people, activeId, setActivePersonId, loading } = usePeople();
+  const { profile } = useAccount();
+
+  const tabs = profile?.is_admin ? [...BASE_TABS, { href: "/admin", label: "Admin" }] : BASE_TABS;
 
   async function signOut() {
     await supabase.auth.signOut();
@@ -25,40 +27,16 @@ export default function NavBar() {
     router.refresh();
   }
 
-  function handleSwitch(e) {
-    const value = e.target.value;
-    if (value === "__add__") {
-      router.push("/people");
-      return;
-    }
-    setActivePersonId(value);
-    router.refresh();
-  }
-
   return (
-    <>
-      <nav className="tabs">
-        {TABS.map((t) => (
-          <Link key={t.href} href={t.href} className={pathname.startsWith(t.href) ? "active" : ""}>
-            {t.label}
-          </Link>
-        ))}
-        <a onClick={signOut} style={{ cursor: "pointer" }}>
-          Sign out
-        </a>
-      </nav>
-      {!loading && people.length > 0 && (
-        <div style={{ display: "flex", justifyContent: "center", padding: "8px 10px 0" }}>
-          <select value={activeId || ""} onChange={handleSwitch} style={{ maxWidth: 260 }}>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-            <option value="__add__">+ Add / manage people…</option>
-          </select>
-        </div>
-      )}
-    </>
+    <nav className="tabs">
+      {tabs.map((t) => (
+        <Link key={t.href} href={t.href} className={pathname.startsWith(t.href) ? "active" : ""}>
+          {t.label}
+        </Link>
+      ))}
+      <a onClick={signOut} style={{ cursor: "pointer" }}>
+        Sign out
+      </a>
+    </nav>
   );
 }

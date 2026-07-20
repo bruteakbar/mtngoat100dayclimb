@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import { getDayProgressRow, upsertDayProgress, dayNumberFromStartDate } from "@/lib/db";
 import { getDayPlan, getAlternates, PHASE_NAMES, LEVELS } from "@/lib/schedule";
-import { usePeople } from "../PersonProvider";
+import { useAccount } from "../AccountProvider";
 
 export default function TodayPage() {
   return (
@@ -18,61 +18,90 @@ export default function TodayPage() {
 
 const RELATION_LABEL = { easier: "Easier", similar: "Similar", harder: "Harder" };
 
+function minPart(totalSeconds) {
+  if (totalSeconds === undefined || totalSeconds === null || totalSeconds === "") return "";
+  return String(Math.floor(Number(totalSeconds) / 60));
+}
+function secPart(totalSeconds) {
+  if (totalSeconds === undefined || totalSeconds === null || totalSeconds === "") return "";
+  return String(Math.round(Number(totalSeconds) % 60)).padStart(2, "0");
+}
+function secondsFromMinSec(min, sec) {
+  const hasMin = min !== "" && min !== undefined;
+  const hasSec = sec !== "" && sec !== undefined;
+  if (!hasMin && !hasSec) return undefined;
+  const m = parseInt(min, 10) || 0;
+  const s = parseInt(sec, 10) || 0;
+  return m * 60 + s;
+}
+
 function TodayPageInner() {
   const supabase = createClient();
   const searchParams = useSearchParams();
   const dayOverride = parseInt(searchParams.get("day"), 10);
-  const { userId, activePerson, loading: peopleLoading } = usePeople();
+  const { userId, profile, loading: accountLoading } = useAccount();
 
   const [day, setDay] = useState(dayOverride >= 1 && dayOverride <= 100 ? dayOverride : 1);
-  const [record, setRecord] = useState({ done: false, checks: {}, notes: "", swaps: {} });
+  const [record, setRecord] = useState({ done: false, checks: {}, notes: "", swaps: {}, benchmarks: {} });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [openSwapIdx, setOpenSwapIdx] = useState(null);
 
-  // Once we know who's active, default to their "today" unless a ?day=
-  // override was passed in from the Schedule page.
+  // Once we know the account's start date, default to "today" unless a
+  // ?day= override was passed in from the Schedule page or the grid.
   useEffect(() => {
-    if (!activePerson) return;
+    if (!profile) return;
     if (dayOverride >= 1 && dayOverride <= 100) return;
-    setDay(dayNumberFromStartDate(activePerson.start_date));
+    setDay(dayNumberFromStartDate(profile.start_date));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePerson?.id]);
+  }, [profile?.id]);
 
   const loadDay = useCallback(
     async (d) => {
-      if (!activePerson) return;
+      if (!userId) return;
       setLoading(true);
-      const row = await getDayProgressRow(supabase, activePerson.id, d);
+      const row = await getDayProgressRow(supabase, userId, d);
       setRecord({
         done: row?.done || false,
         checks: row?.checks || {},
         notes: row?.notes || "",
         swaps: row?.swaps || {},
+        benchmarks: row?.benchmarks || {},
       });
       setLoading(false);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activePerson?.id]
+    [userId]
   );
 
   useEffect(() => {
-    if (day && activePerson) loadDay(day);
+    if (day && userId) loadDay(day);
     setOpenSwapIdx(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day, activePerson?.id]);
+  }, [day, userId]);
 
   async function persist(patch) {
-    if (!userId || !activePerson) return;
+    if (!userId) return;
     setSaving(true);
-    await upsertDayProgress(supabase, userId, activePerson.id, day, patch);
+    await upsertDayProgress(supabase, userId, day, patch);
     setSaving(false);
+  }
+
+  function fullPatch(overrides) {
+    return {
+      checks: record.checks,
+      done: record.done,
+      notes: record.notes,
+      swaps: record.swaps,
+      benchmarks: record.benchmarks,
+      ...overrides,
+    };
   }
 
   function toggleCheck(idx) {
     const checks = { ...record.checks, [idx]: !record.checks[idx] };
     setRecord((r) => ({ ...r, checks }));
-    persist({ checks, done: record.done, notes: record.notes, swaps: record.swaps });
+    persist(fullPatch({ checks }));
   }
 
   function updateNotes(notes) {
@@ -80,19 +109,19 @@ function TodayPageInner() {
   }
 
   function saveNotes() {
-    persist({ notes: record.notes, done: record.done, checks: record.checks, swaps: record.swaps });
+    persist(fullPatch({}));
   }
 
   function toggleDone() {
     const done = !record.done;
     setRecord((r) => ({ ...r, done }));
-    persist({ done, checks: record.checks, notes: record.notes, swaps: record.swaps });
+    persist(fullPatch({ done }));
   }
 
   function applySwap(idx, newExerciseId) {
     const swaps = { ...record.swaps, [idx]: newExerciseId };
     setRecord((r) => ({ ...r, swaps }));
-    persist({ swaps, done: record.done, checks: record.checks, notes: record.notes });
+    persist(fullPatch({ swaps }));
     setOpenSwapIdx(null);
   }
 
@@ -100,16 +129,23 @@ function TodayPageInner() {
     const swaps = { ...record.swaps };
     delete swaps[idx];
     setRecord((r) => ({ ...r, swaps }));
-    persist({ swaps, done: record.done, checks: record.checks, notes: record.notes });
+    persist(fullPatch({ swaps }));
     setOpenSwapIdx(null);
   }
 
-  if (peopleLoading || !activePerson) {
+  function updateBenchmark(key, value) {
+    const benchmarks = { ...record.benchmarks, [key]: value };
+    setRecord((r) => ({ ...r, benchmarks }));
+  }
+
+  function saveBenchmarks() {
+    persist(fullPatch({}));
+  }
+
+  if (accountLoading || !profile) {
     return (
       <div className="card">
-        <p style={{ color: "var(--muted)" }}>
-          {peopleLoading ? "Loading..." : "No person set up yet — add one on the People page."}
-        </p>
+        <p style={{ color: "var(--muted)" }}>Loading...</p>
       </div>
     );
   }
@@ -122,10 +158,10 @@ function TodayPageInner() {
     );
   }
 
-  const plan = getDayPlan(day, activePerson.level, record.swaps);
+  const plan = getDayPlan(day, profile.level, record.swaps);
   const kindLabel =
     plan.kind === "REST" ? "ACTIVE REST" : plan.kind === "TEST" ? "BENCHMARK TEST" : plan.pillClass === "hiit" ? "HIIT / CONDITIONING" : "STRENGTH";
-  const levelLabel = LEVELS.find((l) => l.id === activePerson.level)?.label || "Beginner";
+  const levelLabel = LEVELS.find((l) => l.id === profile.level)?.label || "Beginner";
 
   return (
     <>
@@ -135,8 +171,8 @@ function TodayPageInner() {
         <button onClick={() => setDay((d) => Math.min(100, d + 1))}>&#8594;</button>
       </div>
       <p style={{ textAlign: "center", color: "var(--muted)", fontSize: ".8rem", marginTop: -6 }}>
-        {activePerson.name} · {levelLabel} plan ·{" "}
-        <Link href="/people" style={{ color: "var(--accent)" }}>
+        {levelLabel} plan ·{" "}
+        <Link href="/settings" style={{ color: "var(--accent)" }}>
           change
         </Link>
       </p>
@@ -161,10 +197,50 @@ function TodayPageInner() {
           </div>
         ) : plan.kind === "TEST" ? (
           <div style={{ marginTop: 12 }}>
-            {plan.blocks.map((b, i) => (
-              <div className="exercise" key={i}>
-                <input type="checkbox" checked={!!record.checks[i]} onChange={() => toggleCheck(i)} />
-                <div className="name">{b.raw}</div>
+            {plan.blocks.map((b) => (
+              <div className="benchmark-row" key={b.key}>
+                <div className="name">{b.label}</div>
+                {b.type === "reps" ? (
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    placeholder="reps"
+                    className="benchmark-input"
+                    value={record.benchmarks[b.key] ?? ""}
+                    onChange={(e) => updateBenchmark(b.key, e.target.value === "" ? undefined : Number(e.target.value))}
+                    onBlur={saveBenchmarks}
+                  />
+                ) : (
+                  <div className="benchmark-time">
+                    <input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      placeholder="min"
+                      className="benchmark-input small"
+                      value={minPart(record.benchmarks[b.key])}
+                      onChange={(e) =>
+                        updateBenchmark(b.key, secondsFromMinSec(e.target.value, secPart(record.benchmarks[b.key])))
+                      }
+                      onBlur={saveBenchmarks}
+                    />
+                    <span>:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="59"
+                      inputMode="numeric"
+                      placeholder="sec"
+                      className="benchmark-input small"
+                      value={secPart(record.benchmarks[b.key])}
+                      onChange={(e) =>
+                        updateBenchmark(b.key, secondsFromMinSec(minPart(record.benchmarks[b.key]), e.target.value))
+                      }
+                      onBlur={saveBenchmarks}
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>

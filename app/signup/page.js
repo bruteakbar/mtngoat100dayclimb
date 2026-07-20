@@ -3,10 +3,11 @@
 import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { usernameToEmail, validateUsername, normalizeUsername } from "@/lib/auth";
 
 export default function SignupPage() {
   const supabase = createClient();
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
@@ -15,11 +16,27 @@ export default function SignupPage() {
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
+
+    const usernameError = validateUsername(username);
+    if (usernameError) {
+      setError(usernameError);
+      return;
+    }
+
     setLoading(true);
-    const { error } = await supabase.auth.signUp({ email, password });
+    const clean = normalizeUsername(username);
+    const { error } = await supabase.auth.signUp({
+      email: usernameToEmail(clean),
+      password,
+      options: { data: { username: clean } },
+    });
     setLoading(false);
     if (error) {
-      setError(error.message);
+      setError(
+        /already registered|already exists/i.test(error.message)
+          ? "That username is already taken. Try another."
+          : error.message
+      );
       return;
     }
     setDone(true);
@@ -31,9 +48,9 @@ export default function SignupPage() {
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="MTN GOAT — 100 Day Climb" className="auth-logo" />
         <div className="card">
-          <h2>Check your email</h2>
+          <h2>You're in</h2>
           <p style={{ color: "var(--muted)", fontSize: ".9rem" }}>
-            We sent a confirmation link to <b>{email}</b>. Click it, then come back and log in.
+            Your account is ready — head back and log in with your username and password.
           </p>
           <Link className="muted-link" href="/login">
             Back to login
@@ -52,10 +69,12 @@ export default function SignupPage() {
         <p style={{ color: "var(--muted)", fontSize: ".85rem" }}>Start your 100 days</p>
         <form onSubmit={handleSubmit}>
           <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            type="text"
+            placeholder="Username"
+            autoCapitalize="none"
+            autoCorrect="off"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
             required
           />
           <input
@@ -71,6 +90,9 @@ export default function SignupPage() {
             {loading ? "Creating account..." : "Sign up"}
           </button>
         </form>
+        <p style={{ color: "var(--muted)", fontSize: ".78rem", marginTop: 10 }}>
+          Letters, numbers, and . _ - only, 3-30 characters. No email needed.
+        </p>
         <Link className="muted-link" href="/login">
           Already have an account? Log in
         </Link>

@@ -1,128 +1,160 @@
 -- 100 Days Tracker — Supabase schema
 -- Run this in the Supabase SQL Editor (Project > SQL Editor > New query) once per project.
--- If you already ran an earlier version of this file, skip to the MIGRATION
--- block below instead of running the CREATE TABLE statements again.
+-- Every statement here is safe to re-run (create table if not exists, add
+-- column if not exists, create or replace function/policy) EXCEPT the
+-- MIGRATION block below, which only applies if you're upgrading from the
+-- older multi-person ("people" table) version of this schema — see its
+-- comment for details.
 
--- 1. Account-level profile. Per-person scheduling fields (level, start_date)
---    now live on the `people` table below, since one account can track
---    multiple people.
+-- 1. One row per account. This *is* the tracked person now (earlier
+--    versions of this app let one login track multiple people via a
+--    separate `people` table; that's been folded in here — one account,
+--    one 100-day tracker). `is_admin` marks accounts that can see and
+--    manage every other account from the in-app Admin page. The very
+--    first account ever created on a fresh database automatically becomes
+--    an admin (see the trigger in section 5) — make sure you're the first
+--    person to sign up right after deploying.
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text,
-  created_at timestamptz not null default now()
-);
-
--- 2. People — one logged-in account can add multiple people (family,
---    clients, teammates, etc). Each person has their own level and start
---    date and follows their own 100-day schedule independently, with no
---    separate login required for them.
-create table if not exists public.people (
-  id uuid primary key default gen_random_uuid(),
-  owner_id uuid not null references auth.users(id) on delete cascade,
-  name text not null,
   level text not null default 'beginner' check (level in ('beginner', 'intermediate', 'advanced')),
   start_date date not null default current_date,
+  is_admin boolean not null default false,
   created_at timestamptz not null default now()
 );
 
--- 3. Per-person, per-day progress log. `swaps` records any exercise
---    substitutions the user made for that specific day (see app for logic).
+-- Safe to re-run any time (including on a table that was just created above):
+-- makes sure these columns exist even if you ran an earlier version of this
+-- script before the single-tracker/admin feature was added.
+alter table public.profiles add column if not exists level text not null default 'beginner' check (level in ('beginner', 'intermediate', 'advanced'));
+alter table public.profiles add column if not exists start_date date not null default current_date;
+alter table public.profiles add column if not exists is_admin boolean not null default false;
+
+-- 2. Per-account, per-day progress log. `swaps` records any exercise
+--    substitutions made for that specific day (see app for logic).
 create table if not exists public.user_progress (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  person_id uuid not null references public.people(id) on delete cascade,
   day int not null check (day between 1 and 100),
   done boolean not null default false,
   checks jsonb not null default '{}'::jsonb,
   swaps jsonb not null default '{}'::jsonb,
+  benchmarks jsonb not null default '{}'::jsonb,
   notes text default '',
   updated_at timestamptz not null default now(),
-  unique (person_id, day)
+  unique (user_id, day)
 );
 
+alter table public.user_progress add column if not exists benchmarks jsonb not null default '{}'::jsonb;
+
 -- ---------------------------------------------------------------------
--- MIGRATION: already have a deployed database with the old single-person
--- `profiles.level` / `profiles.start_date` columns? Run this block
--- instead of the CREATE TABLE statements above. Safe to re-run.
+-- MIGRATION: upgrading from the earlier version of this app that had a
+-- separate `people` table (one login tracking multiple people)? Run this
+-- block once, after the statements above have run (they already add the
+-- new columns to an existing `profiles`/`user_progress` table via
+-- IF NOT EXISTS / ADD COLUMN IF NOT EXISTS). Safe to re-run.
 --
---   create table if not exists public.people (
---     id uuid primary key default gen_random_uuid(),
---     owner_id uuid not null references auth.users(id) on delete cascade,
---     name text not null,
---     level text not null default 'beginner' check (level in ('beginner', 'intermediate', 'advanced')),
---     start_date date not null default current_date,
---     created_at timestamptz not null default now()
---   );
+--   -- pull each account's level/start_date from their first-created person
+--   update public.profiles p
+--   set level = pe.level, start_date = pe.start_date
+--   from (
+--     select distinct on (owner_id) owner_id, level, start_date
+--     from public.people
+--     order by owner_id, created_at asc
+--   ) pe
+--   where pe.owner_id = p.id;
 --
---   alter table public.people enable row level security;
---   drop policy if exists "people_select_own" on public.people;
---   create policy "people_select_own" on public.people for select using (auth.uid() = owner_id);
---   drop policy if exists "people_insert_own" on public.people;
---   create policy "people_insert_own" on public.people for insert with check (auth.uid() = owner_id);
---   drop policy if exists "people_update_own" on public.people;
---   create policy "people_update_own" on public.people for update using (auth.uid() = owner_id);
---   drop policy if exists "people_delete_own" on public.people;
---   create policy "people_delete_own" on public.people for delete using (auth.uid() = owner_id);
+--   -- this app now tracks one person per account: if an account had more
+--   -- than one person, keep only the progress that belonged to their
+--   -- first-created person and drop the rest
+--   delete from public.user_progress up
+--   using public.people pe
+--   where up.person_id = pe.id
+--     and pe.id not in (
+--       select distinct on (owner_id) id from public.people order by owner_id, created_at asc
+--     );
 --
---   -- one "Me" person per existing account, carrying over their old level/start_date
---   insert into public.people (owner_id, name, level, start_date)
---   select p.id, 'Me', coalesce(p.level, 'beginner'), coalesce(p.start_date, current_date)
---   from public.profiles p
---   where not exists (select 1 from public.people pe where pe.owner_id = p.id);
+--   alter table public.user_progress drop constraint if exists user_progress_person_id_day_key;
+--   alter table public.user_progress add constraint user_progress_user_id_day_key unique (user_id, day);
+--   alter table public.user_progress drop column if exists person_id;
 --
---   alter table public.user_progress add column if not exists person_id uuid references public.people(id) on delete cascade;
---   alter table public.user_progress add column if not exists swaps jsonb not null default '{}'::jsonb;
---
---   -- point every existing progress row at that account's "Me" person
---   update public.user_progress up
---   set person_id = pe.id
---   from public.people pe
---   where pe.owner_id = up.user_id and up.person_id is null;
---
---   alter table public.user_progress alter column person_id set not null;
---   alter table public.user_progress drop constraint if exists user_progress_user_id_day_key;
---   alter table public.user_progress add constraint user_progress_person_id_day_key unique (person_id, day);
+--   drop table if exists public.people;
 -- ---------------------------------------------------------------------
 
--- 4. Row Level Security — every user can only ever see/write their own
---    account, their own people, and progress rows tied to their own account.
+-- 3. Helper: is this account an admin? `security definer` so it can read
+--    `profiles` for the RLS checks below without recursing into RLS itself.
+create or replace function public.is_admin(uid uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select coalesce((select is_admin from public.profiles where id = uid), false);
+$$;
+grant execute on function public.is_admin(uuid) to authenticated, anon;
+
+-- 4. Row Level Security. Everyone can read/write their own account; admins
+--    can additionally read/write every account (needed for the Admin page
+--    and the master accountability grid).
 alter table public.profiles enable row level security;
-alter table public.people enable row level security;
 alter table public.user_progress enable row level security;
 
 drop policy if exists "profiles_select_own" on public.profiles;
-create policy "profiles_select_own" on public.profiles for select using (auth.uid() = id);
+drop policy if exists "profiles_select_own_or_admin" on public.profiles;
+create policy "profiles_select_own_or_admin" on public.profiles
+  for select using (auth.uid() = id or public.is_admin(auth.uid()));
+
 drop policy if exists "profiles_insert_own" on public.profiles;
-create policy "profiles_insert_own" on public.profiles for insert with check (auth.uid() = id);
+create policy "profiles_insert_own" on public.profiles
+  for insert with check (auth.uid() = id);
+
 drop policy if exists "profiles_update_own" on public.profiles;
-create policy "profiles_update_own" on public.profiles for update using (auth.uid() = id);
+drop policy if exists "profiles_update_own_or_admin" on public.profiles;
+create policy "profiles_update_own_or_admin" on public.profiles
+  for update using (auth.uid() = id or public.is_admin(auth.uid()));
 
 drop policy if exists "people_select_own" on public.people;
-create policy "people_select_own" on public.people for select using (auth.uid() = owner_id);
 drop policy if exists "people_insert_own" on public.people;
-create policy "people_insert_own" on public.people for insert with check (auth.uid() = owner_id);
 drop policy if exists "people_update_own" on public.people;
-create policy "people_update_own" on public.people for update using (auth.uid() = owner_id);
 drop policy if exists "people_delete_own" on public.people;
-create policy "people_delete_own" on public.people for delete using (auth.uid() = owner_id);
 
 drop policy if exists "progress_select_own" on public.user_progress;
-create policy "progress_select_own" on public.user_progress for select using (auth.uid() = user_id);
-drop policy if exists "progress_insert_own" on public.user_progress;
-create policy "progress_insert_own" on public.user_progress for insert with check (auth.uid() = user_id);
-drop policy if exists "progress_update_own" on public.user_progress;
-create policy "progress_update_own" on public.user_progress for update using (auth.uid() = user_id);
-drop policy if exists "progress_delete_own" on public.user_progress;
-create policy "progress_delete_own" on public.user_progress for delete using (auth.uid() = user_id);
+drop policy if exists "progress_select_own_or_admin" on public.user_progress;
+create policy "progress_select_own_or_admin" on public.user_progress
+  for select using (auth.uid() = user_id or public.is_admin(auth.uid()));
 
--- 5. Auto-create a profile row + a default "Me" person the moment someone signs up
+drop policy if exists "progress_insert_own" on public.user_progress;
+drop policy if exists "progress_insert_own_or_admin" on public.user_progress;
+create policy "progress_insert_own_or_admin" on public.user_progress
+  for insert with check (auth.uid() = user_id or public.is_admin(auth.uid()));
+
+drop policy if exists "progress_update_own" on public.user_progress;
+drop policy if exists "progress_update_own_or_admin" on public.user_progress;
+create policy "progress_update_own_or_admin" on public.user_progress
+  for update using (auth.uid() = user_id or public.is_admin(auth.uid()));
+
+drop policy if exists "progress_delete_own" on public.user_progress;
+drop policy if exists "progress_delete_own_or_admin" on public.user_progress;
+create policy "progress_delete_own_or_admin" on public.user_progress
+  for delete using (auth.uid() = user_id or public.is_admin(auth.uid()));
+
+-- 5. Auto-create a profile the moment someone signs up. The app signs
+--    people up with a username + password (no real email is collected) —
+--    signUp() is called with a synthetic, non-deliverable email plus
+--    `options: { data: { username } }`, and that username is pulled out of
+--    the new user's metadata here and stored as profiles.display_name.
+--
+--    The very first account ever created on a fresh database (i.e. no
+--    other account is already an admin) automatically becomes an admin.
 create or replace function public.handle_new_user()
 returns trigger as $$
+declare
+  make_admin boolean;
 begin
-  insert into public.profiles (id) values (new.id) on conflict (id) do nothing;
-  insert into public.people (owner_id, name)
-  values (new.id, 'Me')
-  on conflict do nothing;
+  select not exists(select 1 from public.profiles where is_admin) into make_admin;
+  insert into public.profiles (id, display_name, is_admin)
+  values (new.id, new.raw_user_meta_data ->> 'username', coalesce(make_admin, true))
+  on conflict (id) do update set display_name = excluded.display_name;
   return new;
 end;
 $$ language plpgsql security definer set search_path = public;
@@ -145,3 +177,27 @@ drop trigger if exists touch_user_progress on public.user_progress;
 create trigger touch_user_progress
   before update on public.user_progress
   for each row execute procedure public.touch_updated_at();
+
+-- 7. Lets an admin fully remove another account (deletes the auth.users
+--    row; profiles + user_progress cascade-delete automatically since both
+--    reference auth.users with ON DELETE CASCADE). Callable from the app
+--    via supabase.rpc('admin_delete_user', { target_id }). An admin can't
+--    delete their own account through this function (avoids locking
+--    themselves out) — the app also blocks removing the last admin.
+create or replace function public.admin_delete_user(target_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if not public.is_admin(auth.uid()) then
+    raise exception 'Only admins can delete accounts.';
+  end if;
+  if target_id = auth.uid() then
+    raise exception 'You cannot delete your own account from the admin page.';
+  end if;
+  delete from auth.users where id = target_id;
+end;
+$$;
+grant execute on function public.admin_delete_user(uuid) to authenticated;

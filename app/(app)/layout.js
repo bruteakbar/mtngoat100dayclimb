@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import NavBar from "./NavBar";
-import { PersonProvider } from "./PersonProvider";
+import { AccountProvider } from "./AccountProvider";
 
 export default async function AppLayout({ children }) {
   const supabase = await createClient();
@@ -12,7 +12,7 @@ export default async function AppLayout({ children }) {
   if (!user) redirect("/login");
 
   return (
-    <PersonProvider>
+    <AccountProvider>
       <header className="topbar">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="MTN GOAT — 100 Day Climb" className="app-logo" />
@@ -20,6 +20,6 @@ export default async function AppLayout({ children }) {
       </header>
       <NavBar />
       <main className="container">{children}</main>
-    </PersonProvider>
+    </AccountProvider>
   );
 }
