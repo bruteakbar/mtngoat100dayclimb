@@ -90,12 +90,19 @@ git history).
 ## Accounts and admin
 
 Signing up only ever asks for a **username** and **password** — no email
-address is collected anywhere in the UI. Under the hood it still runs on
-Supabase Auth (so password hashing, sessions, and Row Level Security via
-`auth.uid()` all keep working exactly as before); `lib/auth.js` derives a
-synthetic, non-deliverable email like `yourname@users.mtngoat.internal` from
-the username and uses that with Supabase Auth behind the scenes. The
-username itself is stored in `profiles.display_name` via the signup trigger.
+address is collected anywhere in the UI, and usernames can be anything (any
+characters, spaces, unicode — no format restrictions, just non-empty and
+under 60 characters). Under the hood it still runs on Supabase Auth (so
+password hashing, sessions, and Row Level Security via `auth.uid()` all keep
+working exactly as before); each account gets a random, non-deliverable
+email (`lib/auth.js`'s `randomSyntheticEmail()`) that has no relationship to
+the username at all. At login, a Postgres function
+(`username_login_email()` in `supabase/schema.sql`) looks up the right email
+for whatever username was typed. Usernames are stored in
+`profiles.display_name` via the signup trigger and are unique,
+case-insensitively — trying to sign up (or get renamed by an admin to) one
+that's already taken surfaces a plain "That username is already taken"
+message.
 
 **The very first account created on a fresh database automatically becomes
 an admin** — there's no separate setup step. Make sure you're the first
@@ -104,25 +111,27 @@ else. From then on, admins can promote or demote any other account from the
 **Admin** page (which only appears in the nav for admins).
 
 Admins can, for any account:
-- View their level, start date, and 100-day accountability grid
-- Edit their level and start date
+- Rename their username, edit their level and start date
 - Promote or demote their admin status (you can't demote the last remaining
   admin — the app blocks it so the account can't get locked out)
 - Delete their account entirely (you can't delete your own account from the
   admin page, and the last remaining admin can't be deleted either)
 
+**Admins never see anyone's workout progress.** The Admin page only manages
+account-level fields (username, level, start date, admin status); the
+`user_progress` table (checks, notes, benchmark results, swaps) is owner-only
+at the database level — the RLS policies in `supabase/schema.sql` give
+admins no bypass on it at all. Each account's Progress page and
+accountability grid stay private to them.
+
 Deleting an account removes their Supabase Auth user, which cascades to
 their profile and every logged day — this can't be undone.
 
-Other tradeoffs worth knowing about:
-- **No self-service "forgot password."** Supabase's password-reset flow
-  emails a link, and these accounts don't have a real inbox. If someone
-  forgets their password, reset it for them from the Supabase dashboard:
-  **Authentication > Users**, find their (synthetic) email, and set a new
-  password for them directly from that screen.
-- Usernames must be 3-30 characters, letters/numbers/`.`/`_`/`-` only
-  (enforced in `lib/auth.js`); trying to sign up with one that's already
-  taken surfaces a plain "That username is already taken" message.
+One tradeoff worth knowing about: **no self-service "forgot password."**
+Supabase's password-reset flow emails a link, and these accounts don't have
+a real inbox. If someone forgets their password, reset it for them from the
+Supabase dashboard: **Authentication > Users**, find their (synthetic)
+email, and set a new password for them directly from that screen.
 
 ## Start date and daily default
 
@@ -140,11 +149,8 @@ The **Progress** page shows a 10×10 grid, one cell per day: **blue** means
 that day was marked complete, **brown** means the day has already passed and
 was never completed, and a plain cell means the day isn't due yet. Tap any
 brown (missed) cell to jump straight to that day on **Today** and fill it
-in retroactively.
-
-Admins see the same grid for every account on the **Admin** page (read-only
-there, since writing to another account's day would misattribute the entry)
-— a "master" view of who's on track and who's fallen behind, at a glance.
+in retroactively. This grid — like the rest of your workout data — is only
+ever visible to you, not to admins.
 
 ## Benchmark tracking
 
@@ -210,25 +216,27 @@ account/day in `user_progress.swaps` and persist across visits.
   a movement family + difficulty tier), the 100-day phase arc, the per-level
   schedule generator, `getAlternates()` for the swap feature, and
   `BENCHMARK_ITEMS`/`formatBenchmarkValue()` for the Day 1/50/100 tests.
-- `lib/auth.js` — turns a username into the synthetic email Supabase Auth
-  needs behind the scenes, plus username validation.
+- `lib/auth.js` — username validation (permissive — any non-empty string
+  under 60 characters) and `randomSyntheticEmail()`, the random
+  non-deliverable email Supabase Auth needs behind the scenes.
 - `lib/db.js` — data-access helpers, including the admin-only helpers
   (`adminListProfiles`, `adminUpdateProfile`, `adminSetAdmin`,
-  `adminDeleteUser`, `adminGetAllProgress`).
+  `adminDeleteUser`) — note there's deliberately no admin helper that reads
+  `user_progress`.
 - `supabase/schema.sql` — `profiles` (account, username, level, start date,
   admin flag) and `user_progress` (per-account, per-day log including swaps
-  + benchmark results), `is_admin()` RLS helper, admin-aware RLS policies,
-  the first-signup-becomes-admin trigger, and the `admin_delete_user()`
-  function.
+  + benchmark results), a unique case-insensitive index on usernames,
+  `is_admin()` and `username_login_email()` helpers, admin-aware RLS on
+  `profiles` only (never `user_progress`), the first-signup-becomes-admin
+  trigger, and the `admin_delete_user()` function.
 - `app/(app)/AccountProvider.js` — React context that loads the signed-in
   account's own profile; every page under `app/(app)/` reads from it via
   `useAccount()`.
-- `app/(app)/AccountabilityGrid.js` — the reusable 10×10 grid component
-  used on both Progress (your own data, clickable) and Admin (every
-  account, read-only).
+- `app/(app)/AccountabilityGrid.js` — the reusable 10×10 grid component,
+  used on the Progress page for your own data.
 - `app/(app)/settings/` — edit your own level + start date.
-- `app/(app)/admin/` — admin-only: manage every account (level, start date,
-  promote/demote, delete) and view each account's accountability grid.
+- `app/(app)/admin/` — admin-only: manage every account's username, level,
+  start date, admin status, and deletion. No workout-progress access.
 - `app/(app)/` — Today (daily view, swaps, benchmark entry), Schedule
   (100-day list), Library (exercise reference), Progress (stats, the
   accountability grid, and Day 1/50/100 benchmark comparison).
@@ -241,8 +249,11 @@ account/day in `user_progress.swaps` and persist across visits.
 ## Notes
 
 - Row Level Security means no account can ever read or write another
-  account's data — except admins, who can, by design, per the RLS policies
-  in `supabase/schema.sql`.
+  account's data. Admins are the one exception, and only for account-level
+  fields on `profiles` (username, level, start date, admin status) — the
+  RLS policies in `supabase/schema.sql` give admins no access to
+  `user_progress` at all, so workout history and benchmark results stay
+  private even from admins.
 - "Confirm email" must stay **off** in Supabase (Authentication > Providers >
   Email) — see step 4 under Supabase setup above. Accounts here don't have a
   real inbox, so a confirmation requirement would lock every new sign-up out

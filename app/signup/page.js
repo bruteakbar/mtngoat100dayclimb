@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { usernameToEmail, validateUsername, normalizeUsername } from "@/lib/auth";
+import { validateUsername, cleanUsername, randomSyntheticEmail } from "@/lib/auth";
 
 export default function SignupPage() {
   const supabase = createClient();
@@ -24,16 +24,16 @@ export default function SignupPage() {
     }
 
     setLoading(true);
-    const clean = normalizeUsername(username);
+    const clean = cleanUsername(username);
     const { error } = await supabase.auth.signUp({
-      email: usernameToEmail(clean),
+      email: randomSyntheticEmail(),
       password,
       options: { data: { username: clean } },
     });
     setLoading(false);
     if (error) {
       setError(
-        /already registered|already exists/i.test(error.message)
+        /already registered|already exists|duplicate|unique|database error/i.test(error.message)
           ? "That username is already taken. Try another."
           : error.message
       );
@@ -91,7 +91,7 @@ export default function SignupPage() {
           </button>
         </form>
         <p style={{ color: "var(--muted)", fontSize: ".78rem", marginTop: 10 }}>
-          Letters, numbers, and . _ - only, 3-30 characters. No email needed.
+          Any username you like. No email needed.
         </p>
         <Link className="muted-link" href="/login">
           Already have an account? Log in

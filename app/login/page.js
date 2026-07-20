@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { usernameToEmail } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,10 +17,18 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email: usernameToEmail(username),
-      password,
+
+    const { data: email, error: lookupError } = await supabase.rpc("username_login_email", {
+      uname: username,
     });
+
+    if (lookupError || !email) {
+      setLoading(false);
+      setError("Wrong username or password.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (error) {
       setError(

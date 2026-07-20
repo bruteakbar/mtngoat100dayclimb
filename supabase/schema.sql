@@ -30,6 +30,12 @@ alter table public.profiles add column if not exists level text not null default
 alter table public.profiles add column if not exists start_date date not null default current_date;
 alter table public.profiles add column if not exists is_admin boolean not null default false;
 
+-- Usernames are free-form (any characters) but must be unique, ignoring
+-- case, so login lookups and admin renames are unambiguous. If this fails
+-- because your database already has two accounts whose usernames only
+-- differ by case, rename one of them first, then re-run.
+create unique index if not exists profiles_display_name_lower_idx on public.profiles (lower(display_name));
+
 -- 2. Per-account, per-day progress log. `swaps` records any exercise
 --    substitutions made for that specific day (see app for logic).
 create table if not exists public.user_progress (
@@ -93,9 +99,33 @@ as $$
 $$;
 grant execute on function public.is_admin(uuid) to authenticated, anon;
 
+-- 3b. Username-based login. Usernames are free-form and are never turned
+--     into an email themselves (see lib/auth.js) — each account instead
+--     gets a random, non-deliverable email at signup. This function looks
+--     up the right email for whatever username was typed, so the login
+--     page can call it (as the anonymous role, before any session exists)
+--     and then sign in with the email it gets back. Matching is
+--     case-insensitive. Because it only ever returns an email — never
+--     whether a username exists on its own — it doesn't leak account
+--     existence beyond what a failed login already would.
+create or replace function public.username_login_email(uname text)
+returns text
+language sql
+security definer
+set search_path = public, auth
+as $$
+  select u.email
+  from public.profiles p
+  join auth.users u on u.id = p.id
+  where lower(p.display_name) = lower(trim(uname))
+  limit 1;
+$$;
+grant execute on function public.username_login_email(text) to anon, authenticated;
+
 -- 4. Row Level Security. Everyone can read/write their own account; admins
---    can additionally read/write every account (needed for the Admin page
---    and the master accountability grid).
+--    can additionally read/write every account's profile (needed for the
+--    Admin page). Workout progress (below) stays owner-only, with no admin
+--    bypass at all.
 alter table public.profiles enable row level security;
 alter table public.user_progress enable row level security;
 
@@ -113,30 +143,30 @@ drop policy if exists "profiles_update_own_or_admin" on public.profiles;
 create policy "profiles_update_own_or_admin" on public.profiles
   for update using (auth.uid() = id or public.is_admin(auth.uid()));
 
-drop policy if exists "people_select_own" on public.people;
-drop policy if exists "people_insert_own" on public.people;
-drop policy if exists "people_update_own" on public.people;
-drop policy if exists "people_delete_own" on public.people;
-
+-- Deliberately owner-only, with NO admin bypass: workout progress and
+-- benchmark results are private to the account that logged them, even from
+-- admins. Admins manage accounts (level, start date, username, admin
+-- status, deletion) on the Admin page, but never see anyone's actual
+-- logged days.
 drop policy if exists "progress_select_own" on public.user_progress;
 drop policy if exists "progress_select_own_or_admin" on public.user_progress;
-create policy "progress_select_own_or_admin" on public.user_progress
-  for select using (auth.uid() = user_id or public.is_admin(auth.uid()));
+create policy "progress_select_own" on public.user_progress
+  for select using (auth.uid() = user_id);
 
 drop policy if exists "progress_insert_own" on public.user_progress;
 drop policy if exists "progress_insert_own_or_admin" on public.user_progress;
-create policy "progress_insert_own_or_admin" on public.user_progress
-  for insert with check (auth.uid() = user_id or public.is_admin(auth.uid()));
+create policy "progress_insert_own" on public.user_progress
+  for insert with check (auth.uid() = user_id);
 
 drop policy if exists "progress_update_own" on public.user_progress;
 drop policy if exists "progress_update_own_or_admin" on public.user_progress;
-create policy "progress_update_own_or_admin" on public.user_progress
-  for update using (auth.uid() = user_id or public.is_admin(auth.uid()));
+create policy "progress_update_own" on public.user_progress
+  for update using (auth.uid() = user_id);
 
 drop policy if exists "progress_delete_own" on public.user_progress;
 drop policy if exists "progress_delete_own_or_admin" on public.user_progress;
-create policy "progress_delete_own_or_admin" on public.user_progress
-  for delete using (auth.uid() = user_id or public.is_admin(auth.uid()));
+create policy "progress_delete_own" on public.user_progress
+  for delete using (auth.uid() = user_id);
 
 -- 5. Auto-create a profile the moment someone signs up. The app signs
 --    people up with a username + password (no real email is collected) —
